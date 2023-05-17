@@ -1,0 +1,3 @@
+[submodule "LaTex-handler"]
+	path = LaTex-handler
+	url = git@github.com:hayk314/LaTex-handler.git
