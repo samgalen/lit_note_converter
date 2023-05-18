@@ -6,8 +6,12 @@ import re
 from argparse import ArgumentParser
 from glob import glob
 from os import path
+from difflib import SequenceMatcher
 
 import bibtexparser
+from LaTexHandler import LaTexAccents as accents
+
+import pandas as pd
 
 class LitNoteException(Exception):
     def __init__(self, filename, line, expected_line, line_number):
@@ -57,16 +61,73 @@ def gen_old_entries(vault_dir, verbose=False):
                 print(e.message)
     return header_data
 
-def map_entries(bib_filename, old_entries):
+def parse_name(author):
+
+    acc = accents.AccentConverter()
+    auth_utf = acc.decode_Tex_Accents(author, utf8_or_ascii=1)
+
+    token_match = re.compile("{.*}")
+
+    if token_match.match(auth_utf.strip()):
+        full_name = auth_utf.strip()
+    elif "," in auth_utf:
+        last, first = auth_utf.split(",")
+        full_name = f"{first.strip()} {last.strip()}"
+    else:
+        full_name = auth_utf
+    san_name = full_name.replace("{", "")
+    san_name = san_name.replace("}","")
+    san_name = san_name.rstrip()
+    san_name = san_name.lstrip()
+
+    return san_name
+
+def sanitize_authors(author_list):
+
+    acc = accents.AccentConverter()
+    de_accented = acc.decode_Tex_Accents(author_list, utf8_or_ascii=1)
+    return re.sub(r'\relax ', '', de_accented)
+
+def parse_author_list(author_list):
+    """
+    Split the entries up, respecting { brackets
+    """
+
+    tokens = sanitize_authors(author_list).split()
+    authors = []
+ 
+    in_brackets = False
+    curr_token = ""
+ 
+    for token in tokens:
+        if token == "and" and not in_brackets:
+            authors.append(curr_token)
+            curr_token = ""
+        else:
+            if token[0] == "{":
+                in_brackets = True
+            if re.match("^.?}[\.,]?$", token[-2:]):
+                in_brackets = False
+            curr_token += " "+token
+    if in_brackets:
+        raise Exception(f"Unenclosed brackets {author_list}")
+    return authors
+
+def compute_diff(authors_1, authors_2):
+    return SequenceMatcher(lambda x: x in "{}", authors_1, authors_2).quick_ratio()
+
+def map_entries(bib_filename, old_entries, verbose=False):
     """
     Try to match entries, first based on year,
     then based on authors, and then based on title
+
+    return a mapping of (old_citekey, new_citekey) = (author_sim, title_sim)
     """
 
     with open(bib_filename, "r") as bib_file:
         bib = bibtexparser.load(bib_file) 
 
-    candidates = {old_entry : [] for old_entry in old_entries} # map old citekey -> [new citekeys]
+    values = {}
 
     for old_entry in old_entries:
 
@@ -81,28 +142,15 @@ def map_entries(bib_filename, old_entries):
                 continue
             if new_entry["year"] != year:
                 continue
-            new_authors = []
-            for author in new_entry["author"].split("and"):
-                if len(author.split()) == 2:
-                    if "," in author:
-                        last, first = author.split(",")
-                    else:
-                        first, last = author.split()
-                    first.replace("{","").strip()
-                    last.replace("{","").strip()
-                    new_authors.append(f"{first} {last}")
-                else:
-                    new_authors.append(f"{author.replace('{','').replace('}','').strip()}")
-            if ",".join(new_authors) != authors:
-                print(f"""new_authors: {",".join(new_authors)}, old_authors: {authors}""")
-                continue
-            title_disc = title.split()
-            title_dist = sum([t in new_entry["title"] for t in title_disc])/float(len(title_disc))
+            new_authors = [parse_name(author) for author in parse_author_list(new_entry["author"])]
 
-            if title_dist < 0.8:
-                continue
-            candidates[old_entry].append(new_entry["ID"])
-    return candidates
+            author_ratio = compute_diff(",".join(new_authors).replace(" ", "").lower(),
+                                        authors.replace(" ", "").lower())
+
+            title_ratio = compute_diff(new_entry["title"].lower(), title.lower())
+            values[(old_entry, new_entry["ID"])] = (author_ratio, title_ratio)
+ 
+    return values
 
 if __name__ == "__main__":
     
@@ -114,9 +162,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     old_entries = gen_old_entries(args.vault_dir, verbose=args.verbose) 
-    candidates = map_entries(args.bib_file, old_entries)
-  
-    for c in candidates:
-        if len(candidates[c]) != 1:
-            print(c, candidates[c])
-    
+    candidates = map_entries(args.bib_file, old_entries, verbose=args.verbose)
+
+    pd.DataFrame.from_dict(candidates, orient="index", columns=["author", "title"]).to_csv("./sample.csv")
