@@ -2,16 +2,20 @@
 Update obsidian literature notes to use a new citekey
 """
 import re
+import json
 
 from argparse import ArgumentParser
 from glob import glob
 from os import path
-from difflib import SequenceMatcher
 
 import bibtexparser
-from LaTexHandler import LaTexAccents as accents
+import editdistance
 
 import pandas as pd
+
+from tqdm import tqdm
+from LaTexHandler import LaTexAccents as accents
+
 
 class LitNoteException(Exception):
     def __init__(self, filename, line, expected_line, line_number):
@@ -116,52 +120,96 @@ def parse_author_list(author_list):
 def compute_diff(authors_1, authors_2):
     return SequenceMatcher(lambda x: x in "{}", authors_1, authors_2).quick_ratio()
 
-def map_entries(bib_filename, old_entries, verbose=False):
+def check_uids(old_cite, new_cite):
     """
-    Try to match entries, first based on year,
-    then based on authors, and then based on title
-
-    return a mapping of (old_citekey, new_citekey) = (author_sim, title_sim)
+    if both have a year, and issn, or doi field, do a quick check to ensure compatibility 
+    
+    return true if match
     """
 
-    with open(bib_filename, "r") as bib_file:
-        bib = bibtexparser.load(bib_file) 
+    if "doi" in old_cite and "doi" in new_cite:
+        return old_cite["doi"] == new_cite["doi"]
+    if "issn" in old_cite and "issn" in new_cite:
+        return old_cite["issn"] == new_cite["issn"]
+    if "year" in old_cite and "year" in new_cite:
+        if "month" in old_cite and "month" in new_cite:
+            return (old_cite["year"] == new_cite["year"]) and (old_cite["month"] == new_cite["month"])
+        return old_cite["year"] == new_cite["year"] 
+    if "doi" in old_cite and "doi" not in new_cite:
+        return False
 
-    values = {}
+    return True
+def map_bibs(cite_list, bib_file_1, bib_file_2, verbose):
+    """
+    Given list of citations (lit note titles) 
+    try to match cite_key from bib_file_1 to citekey in bib_file_2
+    """
 
-    for old_entry in old_entries:
+    with open(bib_file_1, "r") as f:
+        bib_1 = bibtexparser.load(f)
+    with open(bib_file_2, "r") as f:
+        bib_2 = bibtexparser.load(f)
 
-        header_data = old_entries[old_entry]
+    index = pd.MultiIndex.from_product([cite_list, bib_2.entries_dict.keys()], 
+                                        names = ["old", "new"])
+    comp_data = pd.DataFrame(index=index, columns = ["sim", "n_comp", "n_fields_old", "n_fields_new"])
 
-        year = header_data["year"]
-        authors = header_data["authors"]
-        title = header_data["title"]
+    for citekey in tqdm(cite_list):
+        if citekey not in bib_1.entries_dict:
+            if verbose:
+                print(f"{citekey} is not in {bib_file_1}")
+            continue
+        old_cite = bib_1.entries_dict[citekey]
+        for new_cite in bib_2.entries:
 
-        for new_entry in bib.entries:
-            if "year" not in new_entry or "author" not in new_entry or "title" not in new_entry:
-                continue
-            if new_entry["year"] != year:
-                continue
-            new_authors = [parse_name(author) for author in parse_author_list(new_entry["author"])]
+            sim = 0.0
+            n_comp = 0.0
 
-            author_ratio = compute_diff(",".join(new_authors).replace(" ", "").lower(),
-                                        authors.replace(" ", "").lower())
+            if not check_uids(old_cite, new_cite):
+                continue 
 
-            title_ratio = compute_diff(new_entry["title"].lower(), title.lower())
-            values[(old_entry, new_entry["ID"])] = (author_ratio, title_ratio)
- 
-    return values
+            for key in old_cite:
+                if key not in new_cite:
+                    continue
+                sim += editdistance.eval(old_cite[key], new_cite[key])
+                n_comp += 1
+
+            comp_data.loc[(citekey, new_cite["ID"]), "sim"] = sim
+            comp_data.loc[(citekey, new_cite["ID"]), "n_comp"] = n_comp
+            comp_data.loc[(citekey, new_cite["ID"]), "n_fields_old"] = len(old_cite)
+            comp_data.loc[(citekey, new_cite["ID"]), "n_fields_new"] = len(new_cite)                             
+
+    if verbose:
+        print(f"Performed {len(comp_data.dropna())}/{len(index)} matchings")
+
+    return comp_data.dropna() # nas are where comparison did not work
 
 if __name__ == "__main__":
     
     parser = ArgumentParser()
     parser.add_argument("vault_dir", help="directory with target vault")
-    parser.add_argument("bib_file", help="new .bib file") 
+    parser.add_argument("old_bib", help="old .bib file")
+    parser.add_argument("new_bib", help="new .bib file") 
+    parser.add_argument("--candidates-only", action="store_true", 
+            help="Automatically match based on field edit distance, if false, outputs a csv with distances")
+    parser.add_argument("--update-vault", action="store_true", help="using matches.json, update the target vault dir")
     parser.add_argument("--verbose", action="store_true", default=False)
 
     args = parser.parse_args()
-    
-    old_entries = gen_old_entries(args.vault_dir, verbose=args.verbose) 
-    candidates = map_entries(args.bib_file, old_entries, verbose=args.verbose)
+  
+    if not args.update_vault: 
+     
+        old_entries = gen_old_entries(args.vault_dir, verbose=args.verbose) 
+        cite_list = [ck[1:] for ck in old_entries]
+        bib_dists = map_bibs(cite_list, args.old_bib, args.new_bib, args.verbose)
+ 
+        if args.candidates_only: 
+          bib_dists.to_csv("./bib_distances.csv") 
+        else: 
+            avg_dists = bib_dists["sim"]/bib_dists["n_comp"]
+            min_idx = avg_dists.astype("float64").groupby("old").idxmin()
+        
+            cite_map = {k : v for k,v in min_idx.values}
 
-    pd.DataFrame.from_dict(candidates, orient="index", columns=["author", "title"]).to_csv("./sample.csv")
+            with open("matches.json", "w") as f:
+                json.dump(cite_map, f, indent="\t")
