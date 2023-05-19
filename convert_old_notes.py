@@ -3,6 +3,7 @@ Update obsidian literature notes to use a new citekey
 """
 import re
 import json
+import shutil
 
 from argparse import ArgumentParser
 from glob import glob
@@ -184,6 +185,47 @@ def map_bibs(cite_list, bib_file_1, bib_file_2, verbose):
 
     return comp_data.dropna() # nas are where comparison did not work
 
+def handle_note(note_file, citekey_map, verbose, dry_run):
+
+    print_output = dry_run or verbose
+    link_expr = re.compile(r'\[\[([^\]]*)\]\]')
+ 
+    with open(note_file, "r") as f:
+        contents = f.read()
+    new_contents = contents[:]
+    citations = []
+
+    # we will modify by going from back to front
+    # to avoid indexing issues
+
+    for match in link_expr.finditer(contents):
+        if match[1] in citekey_map:
+            citations = [match] + citations
+    for old_cite in citations:
+
+        new_citation = citekey_map[old_cite[1]]
+        old_lb, old_ub = old_cite.span()
+        new_contents = "".join([new_contents[:old_lb+2], new_citation, new_contents[old_ub-2:]])
+
+        if print_output:
+            ub = max(old_ub, old_lb+len(new_citation)+4)
+            print(f"{note_file} {contents[old_lb:old_ub]} -> {new_contents[old_lb:ub]}")
+    file_base = path.splitext(path.basename(note_file))[0]
+    
+    if file_base in citekey_map:
+        new_name = f"{citekey_map[file_base]}.md"
+        new_file = path.join(path.dirname(note_file), new_name)
+        
+        if print_output:
+            print(f"mv {note_file} -> {new_file}")
+    else:
+        new_file = note_file
+    
+    if not dry_run:
+        if note_file != new_file:
+            shutil.move(note_file, new_file)
+        with open(new_file, "w") as f:
+            f.write(new_contents)
 if __name__ == "__main__":
     
     parser = ArgumentParser()
@@ -193,8 +235,9 @@ if __name__ == "__main__":
     parser.add_argument("--candidates-only", action="store_true", 
             help="Automatically match based on field edit distance, if false, outputs a csv with distances")
     parser.add_argument("--update-vault", action="store_true", help="using matches.json, update the target vault dir")
+    parser.add_argument("--dry-run", action="store_true", help="output list of vault modifications, but do not apply them")
     parser.add_argument("--verbose", action="store_true", default=False)
-
+    
     args = parser.parse_args()
   
     if not args.update_vault: 
@@ -213,3 +256,13 @@ if __name__ == "__main__":
 
             with open("matches.json", "w") as f:
                 json.dump(cite_map, f, indent="\t")
+    else:
+        with open("matches.json", "r") as f:
+            citekey_map = json.load(f)
+
+        citekey_map = {"@" + k : "@" + v for k,v in citekey_map.items()}
+
+        vault_files = glob(f"{args.vault_dir}/**/*.md")
+
+        for note_file in vault_files:
+            handle_note(note_file, citekey_map, args.verbose, args.dry_run)
