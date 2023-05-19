@@ -15,8 +15,6 @@ import editdistance
 import pandas as pd
 
 from tqdm import tqdm
-from LaTexHandler import LaTexAccents as accents
-
 
 class LitNoteException(Exception):
     def __init__(self, filename, line, expected_line, line_number):
@@ -65,61 +63,6 @@ def gen_old_entries(vault_dir, verbose=False):
             if verbose:
                 print(e.message)
     return header_data
-
-def parse_name(author):
-
-    acc = accents.AccentConverter()
-    auth_utf = acc.decode_Tex_Accents(author, utf8_or_ascii=1)
-
-    token_match = re.compile("{.*}")
-
-    if token_match.match(auth_utf.strip()):
-        full_name = auth_utf.strip()
-    elif "," in auth_utf:
-        last, first = auth_utf.split(",")
-        full_name = f"{first.strip()} {last.strip()}"
-    else:
-        full_name = auth_utf
-    san_name = full_name.replace("{", "")
-    san_name = san_name.replace("}","")
-    san_name = san_name.rstrip()
-    san_name = san_name.lstrip()
-
-    return san_name
-
-def sanitize_authors(author_list):
-
-    acc = accents.AccentConverter()
-    de_accented = acc.decode_Tex_Accents(author_list, utf8_or_ascii=1)
-    return re.sub(r'\relax ', '', de_accented)
-
-def parse_author_list(author_list):
-    """
-    Split the entries up, respecting { brackets
-    """
-
-    tokens = sanitize_authors(author_list).split()
-    authors = []
- 
-    in_brackets = False
-    curr_token = ""
- 
-    for token in tokens:
-        if token == "and" and not in_brackets:
-            authors.append(curr_token)
-            curr_token = ""
-        else:
-            if token[0] == "{":
-                in_brackets = True
-            if re.match("^.?}[\.,]?$", token[-2:]):
-                in_brackets = False
-            curr_token += " "+token
-    if in_brackets:
-        raise Exception(f"Unenclosed brackets {author_list}")
-    return authors
-
-def compute_diff(authors_1, authors_2):
-    return SequenceMatcher(lambda x: x in "{}", authors_1, authors_2).quick_ratio()
 
 def check_uids(old_cite, new_cite):
     """
